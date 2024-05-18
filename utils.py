@@ -1,4 +1,4 @@
-# Providing functions to load ECG data (single or multi lead) from the LUDB and plot the data with annotations.
+# Providing helper functions for loading ECG data, plotting and peak correction.
 import wfdb
 import neurokit2 as nk
 import numpy as np
@@ -62,6 +62,11 @@ def load_ecg(record_name="1", lead='i', filtered=False, left=0, right=None):
     annotations["T_on"], annotations["T"], annotations["T_off"] = _get_peak_on_off(a, symbols=["t"])
 
     return time, ecg, fs, annotations
+
+
+############################
+#### Plotting functions ####
+############################
 
 def plot_waves(time, ecg, waves, title=None, xlim=[1,8]):
     """
@@ -129,6 +134,23 @@ def plot_interbeat(waves, fs, title=None, xlim=None, ylim=None):
     plt.ylim(ylim)
     plt.show()
 
+def plot_dict_as_interbeat(waves, fs, title=None, xlim=None, ylim=None):
+    # Plot the ECG
+    plt.figure(figsize=(10, 4))
+    # iterate over all morphology waves
+    for w, wave in waves.items():
+        
+            plt.plot(np.diff(wave)/fs, label=f"{w}")
+
+    plt.xlabel('Beat/Complex')
+    plt.ylabel('Interbeat Interval [ms]')
+    plt.legend(loc='upper right', title='Waves', bbox_to_anchor=(1.13, 1))
+    plt.title(title)
+    plt.grid(True)
+    xlim = xlim if xlim is not None else [0, len(list(waves.values())[0])-2]
+    plt.xlim(xlim)
+    plt.ylim(ylim)
+    plt.show()
 
 def plot_results(zs, mu, annotations, waves, fs):
     N = len(waves)
@@ -145,3 +167,91 @@ def plot_results(zs, mu, annotations, waves, fs):
         axs[i].set_xlim([0, len(annotations[waves[i]])-2])
 
     axs[0].legend(loc='upper center', bbox_to_anchor=(0.5, 1.45), ncol=3, fancybox=True, shadow=False, frameon=False)
+
+
+#########################
+#### peak correction ####
+#########################
+def is_max(signal, point):
+    if point == 0 or point >= len(signal) - 1:
+        return False
+    return signal[point] > signal[point-1] and signal[point] > signal[point+1]
+
+def is_min(signal, point):
+    if point == 0 or point >= len(signal) - 1:
+        return False
+    return signal[point] < signal[point-1] and signal[point] < signal[point+1]
+
+def count_extrema(signal, points):
+    count = 0
+    for p in points:
+        if is_max(signal, p):
+            count += 1
+        if is_min(signal, p):
+            count -= 1
+    return count
+
+def correct_to_local_extrema(signal, points, peak_type="both"):
+    """ Corrects the given points to the nearest local maxima/minima in the signal."""
+    corrected_points = []
+
+    for i in range(len(points)):
+        point = points[i]
+
+        # check if point is at the beginning or end of the signal
+        if point == 0 or point == len(signal) - 1:
+            corrected_points.append(point)
+            #print(point, "Point at the edge of the signal")
+            continue
+
+        # check if point is already local maximum
+        if peak_type in ["max", "both"] and is_max(signal, point):
+            corrected_points.append(point)
+            #print(point, "already max")
+            continue
+        # check if point is already local minimum
+        if peak_type in ["min", "both"] and is_min(signal, point):
+            corrected_points.append(point)
+            #print(point, "already min")
+            continue
+
+        # find nearest local maxima/minima
+        left = point - 1
+        right = point + 1
+        while left >= 0 and right < len(signal):
+            if peak_type in ["min", "both"] and is_min(signal, left):
+                #print(left, "found min left")
+                corrected_points.append(left)
+                break
+            if peak_type in ["min", "both"] and is_min(signal, right):
+                #print(right, "found min right")
+                corrected_points.append(right)
+                break
+            if peak_type in ["max", "both"] and is_max(signal, left):
+                #print(left, "found max left")
+                corrected_points.append(left)
+                break
+            if peak_type in ["max", "both"] and is_max(signal, right):
+                #print(right, "found max right")
+                corrected_points.append(right)
+                break
+
+            left -= 1
+            right += 1
+
+    return np.array(corrected_points)
+
+def correct_waves_to_local_extrema(ecg, waves, peak_type):
+    corrected_waves = {}
+    for key, value in waves.items():
+        corrected_waves[key] = correct_to_local_extrema(ecg, value, peak_type=peak_type)
+    return corrected_waves
+
+def correct_waves_to_major_extrema(ecg, waves, detected_waves):
+    corrected_waves = {}
+    for key, value in waves.items():
+        peak_type = "max" if count_extrema(ecg, detected_waves[key]) > 0 else "both"
+        peak_type = "min" if count_extrema(ecg, detected_waves[key]) < 0 else peak_type
+        #print(key, peak_type)
+        corrected_waves[key] = correct_to_local_extrema(ecg, value, peak_type=peak_type)
+    return corrected_waves
